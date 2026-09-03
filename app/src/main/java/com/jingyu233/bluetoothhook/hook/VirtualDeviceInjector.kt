@@ -137,34 +137,64 @@ class VirtualDeviceInjector(
      * 将ScanResult发送给扫描客户端
      * 根据逆向代码line 466: iScannerCallback.onScanResult(scanResult)
      */
-    private fun deliverToClient(
-        scanClient: Any,
-        scannerMap: Any,
-        scanResult: Any
-    ) {
+    /**
+ * 将 ScanResult 发给扫描客户端
+ * 适配 Android 17 Kotlin 版 le_scan：
+ *   ScanClient.scannerId / ScanClient.app
+ *   ScannerApp.callback（不再是 mCallback）
+ */
+private fun deliverToClient(
+    scanClient: Any,
+    scannerMap: Any,
+    scanResult: Any
+) {
+    try {
+        // 1. 优先：ScanClient.app → ScannerApp
+        var scannerApp: Any? = null
         try {
-            // 获取scannerId
-            val scannerId = XposedHelpers.getIntField(scanClient, "mScannerId")
-
-            // 通过scannerMap获取ScannerApp
-            val scannerApp = XposedHelpers.callMethod(scannerMap, "getById", scannerId)
-                ?: return
-
-            // 获取IScannerCallback
-            val callback = XposedHelpers.getObjectField(scannerApp, "mCallback")
-            if (callback == null) {
-                // 有些客户端使用PendingIntent而不是callback
-                return
-            }
-
-            // 调用callback.onScanResult(scanResult)
-            XposedHelpers.callMethod(callback, "onScanResult", scanResult)
-
-        } catch (e: Throwable) {
-            // 某些客户端可能已断开连接，抛出异常让上层处理
-            throw e
+            scannerApp = XposedHelpers.getObjectField(scanClient, "app")
+        } catch (_: Throwable) {
+            // ignore
         }
+        if (scannerApp == null) {
+            try {
+                scannerApp = XposedHelpers.callMethod(scanClient, "getApp")
+            } catch (_: Throwable) {
+                // ignore
+            }
+        }
+
+        // 2. 旧路径兜底：scannerId / mScannerId + scannerMap.getById
+        if (scannerApp == null) {
+            val scannerId = try {
+                XposedHelpers.getIntField(scanClient, "scannerId")
+            } catch (_: Throwable) {
+                XposedHelpers.getIntField(scanClient, "mScannerId")
+            }
+            scannerApp = XposedHelpers.callMethod(scannerMap, "getById", scannerId)
+        }
+
+        if (scannerApp == null) return
+
+        // 3. 取 callback：新字段 callback / 旧字段 mCallback
+        val callback = try {
+            XposedHelpers.getObjectField(scannerApp, "callback")
+        } catch (_: Throwable) {
+            try {
+                XposedHelpers.getObjectField(scannerApp, "mCallback")
+            } catch (_: Throwable) {
+                null
+            }
+        }
+
+        // PendingIntent 客户端没有 callback，跳过
+        if (callback == null) return
+
+        XposedHelpers.callMethod(callback, "onScanResult", scanResult)
+    } catch (e: Throwable) {
+        throw e
     }
+}
 }
 
 /**
